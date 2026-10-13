@@ -60,6 +60,15 @@ with different boards** — check yours before doing anything.
 | SoC / Android | Rockchip **RK3126**, Android **6.0.1**, 1 GB RAM, 32 GB eMMC |
 | Root | Ships with `su` (no prompt — every app gets root) |
 | ADB | Frameo app → Settings → About → **Beta Program** → ADB access |
+| Bought from | [this Amazon listing](https://www.amazon.com/dp/B083SH697H) (October 2026) — see the note below |
+
+> **About that listing:** it's where the tested unit came from, not a guarantee. Sellers change
+> listings without notice, and the same listing can ship a different board or a different brand
+> later — an earlier purchase from a different listing for this project arrived as a locked-down
+> frame with an Allwinner chip and no way in. **What matters is that it's a Frameo frame**: the
+> Frameo app is what offers ADB through its Beta Program, and that's the way in. Once it arrives,
+> check the model and SoC (`adb shell getprop ro.product.model`, `ro.board.platform`) before
+> changing anything. Your results may vary.
 
 ## Warnings
 
