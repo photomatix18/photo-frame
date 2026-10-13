@@ -13,6 +13,22 @@ notes on what that frame's firmware does.
 > **Read the warnings below before touching a frame.** This involves root, system-partition edits
 > and low-level flashing. A mistake can leave a frame that won't boot.
 
+## Screenshots
+
+Captured on the frame itself (1280×800), shown in a drawn mock-up of the frame.
+
+![The slideshow: Orion and the crescent Moon, with the clock and photo date](docs/images/slideshow.png)
+
+| | |
+|---|---|
+| ![Control page: climate, lights and doors from Home Assistant](docs/images/controls.png) | ![Edge menu, swiped in from the left over the slideshow](docs/images/edge-menu.png) |
+| **Control page** — tap the slideshow; back to photos after 30 s | **Edge menu** — swipe in from the left, over any app |
+| ![Running apps page listing Settings and Calculator with Close buttons](docs/images/running-apps.png) | ![Night mode: a large dim clock and the date](docs/images/night-clock.png) |
+| **Running apps** — switch to or close anything left open | **Night mode** — a dim clock when the room's lights are off after sunset |
+
+*Slideshow photos: NASA, Artemis II lunar flyby, 6 April 2026 (public domain). The buttons shown
+are a demo layout.*
+
 ## What it does
 
 - **Slideshow first.** Shows an [Immich Kiosk](https://github.com/damongolding/immich-kiosk)
