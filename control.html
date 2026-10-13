@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kitchen Frame</title>
+<!--
+  Lightweight Home Assistant control page for the kitchen frame (RK3126, 1 GB RAM).
+  The full HA frontend is several MB of JavaScript and is too slow to use on this chip, so this
+  page talks to HA directly: login flow once (Kitchen Frame account, non-admin), then one
+  websocket subscribed to only the entities below. No token is stored anywhere but this
+  page's localStorage - the same thing the HA frontend itself does.
+  Served from the app's assets (file://); the WebView allows file pages to call HA.
+-->
+<style>
+  :root { --bg:#111; --card:#1f1f1f; --on:#f5b942; --text:#eee; --dim:#888; --warn:#e5534b; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font-family: Roboto, "Segoe UI", sans-serif; user-select:none; }
+  #app { display:grid; grid-template-columns: repeat(3, 1fr); gap:14px; padding:16px; height:100%; }
+  .col { display:flex; flex-direction:column; gap:12px; min-height:0; }
+  .col h2 { margin:0 0 2px 4px; font-size:15px; font-weight:500; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+  .tile { background:var(--card); border-radius:14px; padding:12px 16px; min-height:64px;
+    display:flex; align-items:center; justify-content:space-between; gap:10px; }
+  .tile .name { font-size:20px; }
+  .tile .state { font-size:16px; color:var(--dim); }
+  .tile.on { background:#3a2f12; }
+  .tile.on .state { color:var(--on); }
+  .tile.alert .state { color:var(--warn); }
+  .tile.unavail { opacity:.45; }
+  .climate .temps { display:flex; align-items:center; gap:10px; }
+  .climate .cur { font-size:15px; color:var(--dim); }
+  .climate .tgt { font-size:24px; min-width:52px; text-align:center; }
+  .btn { width:52px; height:52px; border-radius:26px; border:none; background:#333; color:var(--text);
+    font-size:28px; line-height:52px; padding:0; }
+  .btn:active, .tile:active { filter:brightness(1.4); }
+  .wide { justify-content:center; font-size:18px; color:var(--dim); }
+  #status { position:fixed; right:14px; bottom:10px; font-size:13px; color:var(--dim); }
+  #login, #confirm { position:fixed; inset:0; background:rgba(0,0,0,.85); display:none;
+    align-items:center; justify-content:center; }
+  .panel { background:var(--card); border-radius:16px; padding:28px; width:440px; }
+  .panel h1 { margin:0 0 16px; font-size:24px; font-weight:500; }
+  .panel input { width:100%; font-size:20px; padding:12px; margin:6px 0 12px; border-radius:10px;
+    border:1px solid #444; background:#111; color:var(--text); }
+  .panel .row { display:flex; gap:12px; justify-content:flex-end; margin-top:8px; }
+  .panel button { font-size:20px; padding:12px 22px; border-radius:10px; border:none; background:#333; color:var(--text); }
+  .panel button.go { background:#2d5a8c; }
+  .panel .err { color:var(--warn); min-height:22px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="status">connecting…</div>
+
+<div id="login"><div class="panel">
+  <h1>Sign in to Home Assistant</h1>
+  <div>Username</div><input id="user" autocomplete="off" autocapitalize="none">
+  <div>Password</div><input id="pass" type="password">
+  <div class="err" id="loginErr"></div>
+  <div class="row"><button class="go" id="loginBtn">Sign in</button></div>
+</div></div>
+
+<div id="confirm"><div class="panel">
+  <h1 id="confirmText"></h1>
+  <div class="row"><button id="confirmNo">Cancel</button><button class="go" id="confirmYes">Yes</button></div>
+</div></div>
+
+<!-- layout.js holds this house's buttons and entity ids (not in the public repo: copy
+     layout.example.js). Cache-busted because HA serves /local with a 31-day cache. -->
+<script>document.write('<script src="layout.js?t=' + Date.now() + '"><\/script>');</script>
+<script>
+"use strict";
+// Served from Home Assistant's /local/, so HA is wherever this page came from.
+var HA = location.protocol + "//" + location.host;
+var WS = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/api/websocket";
+var KF = window.KF_LAYOUT || { columns: [], night: {} };
+// HA's IndieAuth check passes without fetching anything when redirect_uri shares client_id's host.
+var CLIENT_ID = "http://kitchen-frame.local/";
+var REDIRECT = "http://kitchen-frame.local/auth";
+
+// What the page shows (from layout.js). kind decides how a tile looks and what a tap does.
+var LAYOUT = KF.columns;
+var ENTITY_IDS = [];
+LAYOUT.forEach(function (c) { c.items.forEach(function (i) { ENTITY_IDS.push(i.id); }); });
+
+// Night mode (dim clock). Best driven by a Home Assistant binary_sensor helper that is ON when
+// the frame should sleep - e.g. sun down and no light in the room on (see README). If that
+// helper is missing or not loaded yet, fall back to one light + the sun. All ids from layout.js;
+// with none set, night mode simply never starts.
+var NIGHT_HELPER = KF.night.helper || "";
+var NIGHT_LIGHT = KF.night.light || "";
+var SUN = KF.night.sun || "sun.sun";
+[NIGHT_HELPER, SUN, NIGHT_LIGHT].forEach(function (id) { if (id) ENTITY_IDS.push(id); });
+var lastNight = null;
+function checkNight() {
+  var helper = states[NIGHT_HELPER], night;
+  if (helper && (helper.s === "on" || helper.s === "off")) {
+    night = helper.s === "on";
+  } else {
+    if (!NIGHT_LIGHT) return;
+    var light = states[NIGHT_LIGHT], sun = states[SUN];
+    if (!light || !sun) return;   // don't decide until both are known
+    night = light.s === "off" && sun.s === "below_horizon";
+  }
+  if (night === lastNight) return;
+  lastNight = night;
+  if (window.KitchenFrame) window.KitchenFrame.setNight(night);
+}
+
+var states = {};   // entity_id -> { s: state, a: attributes }
+var tiles = {};    // entity_id -> DOM element
+var ws = null, msgId = 1, pending = {}, tokens = null;
+
+// ---------- auth ----------
+function xhr(method, url, body, form) {
+  return new Promise(function (resolve, reject) {
+    var r = new XMLHttpRequest();
+    r.open(method, url);
+    r.setRequestHeader("Content-Type", form ? "application/x-www-form-urlencoded" : "application/json");
+    r.onload = function () {
+      var data = null;
+      try { data = JSON.parse(r.responseText); } catch (e) {}
+      if (r.status >= 200 && r.status < 300) resolve(data); else reject({ status: r.status, data: data });
+    };
+    r.onerror = function () { reject({ status: 0 }); };
+    r.send(body);
+  });
+}
+function formBody(o) {
+  return Object.keys(o).map(function (k) { return encodeURIComponent(k) + "=" + encodeURIComponent(o[k]); }).join("&");
+}
+function saveTokens(t) {
+  tokens = { access: t.access_token, refresh: t.refresh_token || tokens.refresh,
+             expires: Date.now() + (t.expires_in - 60) * 1000 };
+  localStorage.setItem("kf_refresh", tokens.refresh);
+}
+function login(user, pass) {
+  return xhr("POST", HA + "/auth/login_flow",
+      JSON.stringify({ client_id: CLIENT_ID, handler: ["homeassistant", null], redirect_uri: REDIRECT }))
+    .then(function (flow) {
+      return xhr("POST", HA + "/auth/login_flow/" + flow.flow_id,
+          JSON.stringify({ username: user, password: pass, client_id: CLIENT_ID }));
+    })
+    .then(function (step) {
+      if (step.type !== "create_entry") throw { message: "Wrong username or password" };
+      return xhr("POST", HA + "/auth/token",
+          formBody({ grant_type: "authorization_code", code: step.result, client_id: CLIENT_ID }), true);
+    })
+    .then(function (t) { tokens = { refresh: t.refresh_token }; saveTokens(t); });
+}
+function accessToken() {
+  if (tokens && tokens.access && Date.now() < tokens.expires) return Promise.resolve(tokens.access);
+  var refresh = (tokens && tokens.refresh) || localStorage.getItem("kf_refresh");
+  if (!refresh) return Promise.reject({ needLogin: true });
+  tokens = tokens || { refresh: refresh };
+  return xhr("POST", HA + "/auth/token",
+      formBody({ grant_type: "refresh_token", refresh_token: refresh, client_id: CLIENT_ID }), true)
+    .then(function (t) { saveTokens(t); return tokens.access; })
+    .catch(function (e) {
+      // 400 = refresh token revoked or expired: sign in again. Anything else: network, retry later.
+      if (e.status === 400) { localStorage.removeItem("kf_refresh"); tokens = null; throw { needLogin: true }; }
+      throw e;
+    });
+}
+// Tell the app what's wrong so it can show a note over the slideshow and night clock.
+var lastAlert = null, failedConnects = 0;
+function alertApp(text) {
+  if (text === lastAlert) return;
+  lastAlert = text;
+  if (window.KitchenFrame && window.KitchenFrame.setAlert) window.KitchenFrame.setAlert(text);
+}
+function showLogin(msg) {
+  alertApp("Not signed in to Home Assistant — touch to sign in");
+  document.getElementById("login").style.display = "flex";
+  document.getElementById("loginErr").textContent = msg || "";
+}
+document.getElementById("loginBtn").onclick = function () {
+  var u = document.getElementById("user").value.trim(), p = document.getElementById("pass").value;
+  document.getElementById("loginErr").textContent = "Signing in…";
+  login(u, p).then(function () {
+    document.getElementById("pass").value = "";
+    document.getElementById("login").style.display = "none";
+    connect();
+  }).catch(function (e) {
+    document.getElementById("loginErr").textContent =
+      (e && e.message) || (e && e.status === 0 ? "Can't reach Home Assistant" : "Sign-in failed");
+  });
+};
+
+// ---------- websocket ----------
+function setStatus(t) { document.getElementById("status").textContent = t; }
+function send(msg) {
+  return new Promise(function (resolve, reject) {
+    if (!ws || ws.readyState !== 1) { reject("offline"); return; }
+    msg.id = msgId++;
+    pending[msg.id] = { resolve: resolve, reject: reject };
+    ws.send(JSON.stringify(msg));
+  });
+}
+function call(domain, service, data) {
+  return send({ type: "call_service", domain: domain, service: service, service_data: data })
+    .catch(function (e) { setStatus("failed: " + domain + "." + service); });
+}
+function connect() {
+  setStatus("connecting…");
+  accessToken().then(function (token) {
+    ws = new WebSocket(WS);
+    ws.onmessage = function (ev) {
+      var m = JSON.parse(ev.data);
+      if (m.type === "auth_required") ws.send(JSON.stringify({ type: "auth", access_token: token }));
+      else if (m.type === "auth_invalid") { tokens = null; ws.close(); }
+      else if (m.type === "auth_ok") {
+        setStatus("");
+        failedConnects = 0;
+        alertApp("");
+        send({ type: "subscribe_entities", entity_ids: ENTITY_IDS });
+      }
+      else if (m.type === "event" && m.event) applyDiff(m.event);
+      else if (m.type === "result" && pending[m.id]) {
+        if (m.success) pending[m.id].resolve(m.result); else pending[m.id].reject(m.error);
+        delete pending[m.id];
+      }
+    };
+    ws.onclose = function () { setStatus("reconnecting…"); ws = null; setTimeout(connect, 5000); };
+  }).catch(function (e) {
+    if (e && e.needLogin) showLogin();
+    else {
+      setStatus("can't reach Home Assistant — retrying");
+      // ~a minute of failures (6 tries, 10 s apart) before raising it on the slideshow
+      if (++failedConnects >= 6) alertApp("Can't reach Home Assistant");
+      setTimeout(connect, 10000);
+    }
+  });
+}
+// subscribe_entities sends compressed state: a = full adds, c = changes (+ set, - remove), r = removed
+function applyDiff(ev) {
+  var id;
+  if (ev.a) for (id in ev.a) { states[id] = { s: ev.a[id].s, a: ev.a[id].a || {} }; render(id); }
+  if (ev.c) for (id in ev.c) {
+    var cur = states[id] || { s: null, a: {} }, ch = ev.c[id];
+    if (ch["+"]) {
+      if ("s" in ch["+"]) cur.s = ch["+"].s;
+      if (ch["+"].a) for (var k in ch["+"].a) cur.a[k] = ch["+"].a[k];
+    }
+    if (ch["-"] && ch["-"].a) ch["-"].a.forEach(function (k) { delete cur.a[k]; });
+    states[id] = cur; render(id);
+  }
+  if (ev.r) ev.r.forEach(function (rid) { delete states[rid]; render(rid); });
+  checkNight();
+}
+
+// ---------- UI ----------
+var itemById = {};
+function build() {
+  var app = document.getElementById("app");
+  LAYOUT.forEach(function (col) {
+    var c = document.createElement("div"); c.className = "col";
+    var h = document.createElement("h2"); h.textContent = col.title; c.appendChild(h);
+    col.items.forEach(function (it) {
+      itemById[it.id] = it;
+      var t = document.createElement("div");
+      t.className = "tile " + it.kind;
+      if (it.kind === "climate") {
+        t.innerHTML = '<div><div class="name"></div><div class="cur"></div></div>' +
+          '<div class="temps"><button class="btn minus">−</button><div class="tgt">–</div><button class="btn plus">+</button></div>';
+        t.querySelector(".minus").onclick = function (e) { e.stopPropagation(); nudge(it.id, -1); };
+        t.querySelector(".plus").onclick = function (e) { e.stopPropagation(); nudge(it.id, +1); };
+      } else {
+        t.innerHTML = '<div class="name"></div><div class="state">–</div>';
+        t.onclick = function () { tap(it); };
+      }
+      t.querySelector(".name").textContent = it.name;
+      tiles[it.id] = t; c.appendChild(t);
+    });
+    app.appendChild(c);
+  });
+  var full = document.createElement("div");
+  full.className = "tile wide"; full.textContent = "Full dashboard ›";
+  full.onclick = function () { location.href = HA + "/kitchen-frame/kitchen"; };
+  app.lastChild.appendChild(full);
+}
+function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, " ") : ""; }
+function render(id) {
+  var t = tiles[id], it = itemById[id]; if (!t) return;
+  var st = states[id], s = st ? st.s : null, a = st ? st.a : {};
+  t.classList.toggle("unavail", !st || s === "unavailable" || s === "unknown");
+  t.classList.remove("on", "alert");
+  var label = s ? cap(s) : "–";
+  if (it.kind === "climate") {
+    var tgt = a.temperature;
+    t.querySelector(".tgt").textContent = (tgt == null ? "–" : Math.round(tgt) + "°");
+    var act = a.hvac_action ? " · " + cap(a.hvac_action) : "";
+    t.querySelector(".cur").textContent =
+      (a.current_temperature != null ? "Now " + Math.round(a.current_temperature) + "°" : "") + act;
+    t.classList.toggle("on", a.hvac_action === "cooling" || a.hvac_action === "heating");
+    return;
+  }
+  if (it.kind === "weather") label = cap(s) + (a.temperature != null ? " · " + Math.round(a.temperature) + "°" : "");
+  if (it.kind === "toggle" && s === "on") t.classList.add("on");
+  if (it.kind === "cover" && (s === "open" || s === "opening")) t.classList.add("alert");
+  if (it.kind === "lock" && s !== "locked") t.classList.add("alert");
+  if (it.kind === "person") label = s === "home" ? "Home" : s === "not_home" ? "Away" : cap(s);
+  if (it.kind === "scene") label = "";
+  t.querySelector(".state").textContent = label;
+}
+
+var nudgeTimers = {};
+function nudge(id, step) {
+  var st = states[id]; if (!st || st.a.temperature == null) return;
+  st.a.temperature = Math.round(st.a.temperature) + step;
+  render(id);
+  // Several quick taps become one service call, sent a second after the last tap.
+  clearTimeout(nudgeTimers[id]);
+  nudgeTimers[id] = setTimeout(function () {
+    call("climate", "set_temperature", { entity_id: id, temperature: st.a.temperature });
+  }, 1000);
+}
+function confirmThen(text, fn) {
+  document.getElementById("confirmText").textContent = text;
+  document.getElementById("confirm").style.display = "flex";
+  document.getElementById("confirmYes").onclick = function () { document.getElementById("confirm").style.display = "none"; fn(); };
+  document.getElementById("confirmNo").onclick = function () { document.getElementById("confirm").style.display = "none"; };
+}
+function tap(it) {
+  var st = states[it.id], s = st ? st.s : null;
+  if (it.kind === "toggle") return call("light", "toggle", { entity_id: it.id });
+  if (it.kind === "scene") return confirmThen(it.confirm, function () { call("scene", "turn_on", { entity_id: it.id }); });
+  if (it.kind === "cover") {
+    var open = s === "open" || s === "opening";
+    return confirmThen((open ? "Close " : "Open ") + it.name + "?", function () {
+      call("cover", open ? "close_cover" : "open_cover", { entity_id: it.id });
+    });
+  }
+  if (it.kind === "lock") {
+    var locked = s === "locked";
+    return confirmThen((locked ? "Unlock " : "Lock ") + it.name + "?", function () {
+      call("lock", locked ? "unlock" : "lock", { entity_id: it.id });
+    });
+  }
+}
+
+build();
+connect();
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+build/
+# This house's settings and buttons - templates are config.example.properties and layout.example.js
+config.properties
+layout.js
+# Personal splash image (see README) - the splash works without one
+assets/splash.png
+NOTES.private.md

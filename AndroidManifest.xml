@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  package="net.frameo.frame" ON PURPOSE (2026-10-10). The firmware's framework hard-codes
+  net.frameo.frame / net.frameo.frame.ui.activities.AFirstScreen as the home app and will not
+  finish booting without it. Frameo itself was removed; this app takes its name, and the
+  activity-alias below answers to AFirstScreen, so the firmware makes the kiosk the home app.
+  The Java code stays in kitchenframe - hence the fully qualified component names.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="net.frameo.frame">
+
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+  <application
+      android:label="Kitchen Frame"
+      android:icon="@android:drawable/sym_def_app_icon"
+      android:hardwareAccelerated="true"
+      android:usesCleartextTraffic="true"
+      android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+
+    <activity
+        android:name="kitchenframe.MainActivity"
+        android:launchMode="singleTask"
+        android:screenOrientation="sensorLandscape"
+        android:configChanges="orientation|screenSize|keyboardHidden|keyboard">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.LAUNCHER" />
+        <category android:name="android.intent.category.DEFAULT" />
+      </intent-filter>
+    </activity>
+
+    <!-- The name the firmware looks for. Also a real HOME activity, so it is the home screen. -->
+    <activity-alias
+        android:name="net.frameo.frame.ui.activities.AFirstScreen"
+        android:targetActivity="kitchenframe.MainActivity">
+      <intent-filter>
+        <action android:name="android.intent.action.MAIN" />
+        <category android:name="android.intent.category.HOME" />
+        <category android:name="android.intent.category.DEFAULT" />
+      </intent-filter>
+    </activity-alias>
+
+    <service
+        android:name="kitchenframe.EdgeMenuService"
+        android:label="Kitchen Frame edge menu"
+        android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+      <intent-filter>
+        <action android:name="android.accessibilityservice.AccessibilityService" />
+      </intent-filter>
+    </service>
+
+    <receiver android:name="kitchenframe.BootReceiver">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED" />
+      </intent-filter>
+    </receiver>
+  </application>
+</manifest>
